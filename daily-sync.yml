@@ -1,0 +1,43 @@
+name: HubSpot -> Sheets Daily Sync
+
+on:
+  schedule:
+    # 01:00 UTC = 04:00 Europe/Istanbul (yaz/kis saati GitHub cron'unda otomatik
+    # ayarlanmiyor, gerekirse bu satiri mevsime gore elle guncelle)
+    - cron: "0 1 * * *"
+  workflow_dispatch: {}   # Actions sekmesinden elle de calistirilabilsin diye
+
+permissions:
+  contents: write   # keepalive commit icin gerekli
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sync
+        env:
+          HUBSPOT_PRIVATE_APP_TOKEN: ${{ secrets.HUBSPOT_PRIVATE_APP_TOKEN }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        run: python sync.py
+
+      - name: Keepalive commit (60 gunluk inaktivite riskine karsi)
+        run: |
+          git config user.name "hubspot-sync-bot"
+          git config user.email "actions@users.noreply.github.com"
+          mkdir -p .keepalive
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive/last-run.txt
+          git add .keepalive/last-run.txt
+          git diff --staged --quiet || git commit -m "chore: keepalive (last run)"
+          git push
