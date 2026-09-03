@@ -3,8 +3,8 @@ TEK SEFERLIK kurulum script'i -- Sheet1 uzerinde filter view'lari olusturur:
 
   Today, Yesterday, This Week, Last Week, This Month, Last Month,
   This Quarter, Last Quarter, This Year, Last Year,
-  Ocak, Subat, Mart, Nisan, Mayis, Haziran, Temmuz, Agustos, Eylul, Ekim, Kasim, Aralik,
-  Q1, Q2, Q3, Q4
+  January, February, March, April, May, June, July, August, September,
+  October, November, December, Q1, Q2, Q3, Q4
 
 Toplam 26 view. Her granularite icin hem "bulunulan donem" hem "bir onceki
 donem" var. Aylar ve adlandirilmis ceyrekler (Q1-Q4) her zaman ICINDE
@@ -34,9 +34,9 @@ NUM_COLUMNS = 27  # A..AA
 # Create Date = E sutunu = index 4 (0-based)
 CREATE_DATE_COL_INDEX = 4
 
-TURKCE_AYLAR = [
-    "Ocak", "Subat", "Mart", "Nisan", "Mayis", "Haziran",
-    "Temmuz", "Agustos", "Eylul", "Ekim", "Kasim", "Aralik",
+AYLAR = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
 ]
 
 
@@ -68,7 +68,7 @@ VIEWS = [
     ("This Year", "=AND($E2>=DATE(YEAR(TODAY()),1,1),$E2<DATE(YEAR(TODAY())+1,1,1))"),
     ("Last Year", "=AND($E2>=DATE(YEAR(TODAY())-1,1,1),$E2<DATE(YEAR(TODAY()),1,1))"),
 ]
-VIEWS += [(ay, month_formula(i + 1)) for i, ay in enumerate(TURKCE_AYLAR)]
+VIEWS += [(ay, month_formula(i + 1)) for i, ay in enumerate(AYLAR)]
 VIEWS += [(f"Q{q}", quarter_formula(q)) for q in range(1, 5)]
 
 
