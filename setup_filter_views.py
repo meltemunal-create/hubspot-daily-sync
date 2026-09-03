@@ -1,15 +1,21 @@
 """
-TEK SEFERLIK kurulum script'i -- Sheet1 uzerinde 5 adet Filter View olusturur:
-Yesterday / This Week / This Month / This Quarter / This Year
+TEK SEFERLIK kurulum script'i -- Sheet1 uzerinde filter view'lari olusturur:
 
-Bunlar Create Date (E sutunu) uzerinden CUSTOM_FORMULA kriteriyle calisir,
-TODAY()'e bagli oldugu icin her gun otomatik guncel kalir.
+  Today, Yesterday, This Week, Last Week, This Month, Last Month,
+  This Quarter, Last Quarter, This Year, Last Year,
+  Ocak, Subat, Mart, Nisan, Mayis, Haziran, Temmuz, Agustos, Eylul, Ekim, Kasim, Aralik,
+  Q1, Q2, Q3, Q4
 
-NOT: Bu script'in CUSTOM_FORMULA kriter davranisi canli bir spreadsheet'te
-test edilmedi. Calistirdiktan sonra Data > Filter views menusunden 5 view'in
-de goruldugunu ve dogru satirlari filtreledigini kontrol et. Sorun cikarsa,
-README.md'deki "Manuel kurulum" adimlarini kullan (2 dakika suren, UI'dan
-elle kurulum -- garanti calisir).
+Toplam 26 view. Her granularite icin hem "bulunulan donem" hem "bir onceki
+donem" var. Aylar ve adlandirilmis ceyrekler (Q1-Q4) her zaman ICINDE
+BULUNULAN YILA gore hesaplanir (YEAR(TODAY()) uzerinden) -- yani 2027
+geldiginde script'i tekrar calistirmadan otomatik o yila kayar.
+
+Hepsi Create Date (E sutunu) uzerinden CUSTOM_FORMULA kriteriyle calisir.
+
+NOT: Eger daha once eski/bozuk filter view'lar olusturduysan, bu script'i
+calistirmadan once Data > Filter views'tan hepsini silmelisin -- yoksa
+ayni isimle ikinci bir kopyasi olusabilir / cakisabilir.
 
 Calistirma: python setup_filter_views.py
 Gerekli ortam degiskenleri: GOOGLE_SERVICE_ACCOUNT_JSON, SPREADSHEET_ID
@@ -28,13 +34,42 @@ NUM_COLUMNS = 27  # A..AA
 # Create Date = E sutunu = index 4 (0-based)
 CREATE_DATE_COL_INDEX = 4
 
-VIEWS = [
-    ("Yesterday", "=$E2>=TODAY()-1"),
-    ("This Week", "=$E2>=TODAY()-WEEKDAY(TODAY(),3)"),
-    ("This Month", "=$E2>=EOMONTH(TODAY(),-1)+1"),
-    ("This Quarter", "=$E2>=DATE(YEAR(TODAY()),1+3*INT((MONTH(TODAY())-1)/3),1)"),
-    ("This Year", "=$E2>=DATE(YEAR(TODAY()),1,1)"),
+TURKCE_AYLAR = [
+    "Ocak", "Subat", "Mart", "Nisan", "Mayis", "Haziran",
+    "Temmuz", "Agustos", "Eylul", "Ekim", "Kasim", "Aralik",
 ]
+
+
+def month_formula(month_number):
+    """month_number: 1-12. Icinde bulunulan yilin o ayi. EDATE yil donusunu
+    (ör. Aralik -> bir sonraki yilin Ocak'i) otomatik dogru hesaplar."""
+    start = f"DATE(YEAR(TODAY()),{month_number},1)"
+    end = f"EDATE(DATE(YEAR(TODAY()),{month_number},1),1)"
+    return f"=AND($E2>={start},$E2<{end})"
+
+
+def quarter_formula(quarter_number):
+    """quarter_number: 1-4. Icinde bulunulan yilin o ceyregi."""
+    start_month = 3 * (quarter_number - 1) + 1
+    start = f"DATE(YEAR(TODAY()),{start_month},1)"
+    end = f"EDATE(DATE(YEAR(TODAY()),{start_month},1),3)"
+    return f"=AND($E2>={start},$E2<{end})"
+
+
+VIEWS = [
+    ("Today", "=AND($E2>=TODAY(),$E2<TODAY()+1)"),
+    ("Yesterday", "=AND($E2>=TODAY()-1,$E2<TODAY())"),
+    ("This Week", "=AND($E2>=TODAY()-WEEKDAY(TODAY(),3),$E2<TODAY()-WEEKDAY(TODAY(),3)+7)"),
+    ("Last Week", "=AND($E2>=TODAY()-WEEKDAY(TODAY(),3)-7,$E2<TODAY()-WEEKDAY(TODAY(),3))"),
+    ("This Month", "=AND($E2>=DATE(YEAR(TODAY()),MONTH(TODAY()),1),$E2<EDATE(DATE(YEAR(TODAY()),MONTH(TODAY()),1),1))"),
+    ("Last Month", "=AND($E2>=EDATE(DATE(YEAR(TODAY()),MONTH(TODAY()),1),-1),$E2<DATE(YEAR(TODAY()),MONTH(TODAY()),1))"),
+    ("This Quarter", "=AND($E2>=DATE(YEAR(TODAY()),1+3*INT((MONTH(TODAY())-1)/3),1),$E2<EDATE(DATE(YEAR(TODAY()),1+3*INT((MONTH(TODAY())-1)/3),1),3))"),
+    ("Last Quarter", "=AND($E2>=EDATE(DATE(YEAR(TODAY()),1+3*INT((MONTH(TODAY())-1)/3),1),-3),$E2<DATE(YEAR(TODAY()),1+3*INT((MONTH(TODAY())-1)/3),1))"),
+    ("This Year", "=AND($E2>=DATE(YEAR(TODAY()),1,1),$E2<DATE(YEAR(TODAY())+1,1,1))"),
+    ("Last Year", "=AND($E2>=DATE(YEAR(TODAY())-1,1,1),$E2<DATE(YEAR(TODAY()),1,1))"),
+]
+VIEWS += [(ay, month_formula(i + 1)) for i, ay in enumerate(TURKCE_AYLAR)]
+VIEWS += [(f"Q{q}", quarter_formula(q)) for q in range(1, 5)]
 
 
 def main():
