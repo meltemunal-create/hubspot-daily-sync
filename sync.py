@@ -16,7 +16,7 @@ import time
 import html
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date as date_cls
 from zoneinfo import ZoneInfo
 
 import requests
@@ -35,7 +35,13 @@ SHEET_NAME = os.environ.get("SHEET_NAME", "Sheet1")
 
 TZ = ZoneInfo("Europe/Istanbul")
 DATE_FMT = "%d.%m.%Y"          # goruntuleme formati (hucre number-format olarak uygulanir)
-DATE_STORAGE_FMT = "%Y-%m-%d"  # ISO -- Sheets'in locale'den bagimsiz taniyabildigi tek format
+SHEETS_EPOCH = date_cls(1899, 12, 30)  # Google Sheets'in kendi tarih sayma baslangici
+
+
+def to_sheets_serial(d):
+    """Python date -> Sheets'in gercek tarih hucresi olarak tanidigi tam sayi.
+    Locale'e / string parse'a bagimli degil, garanti calisir."""
+    return (d - SHEETS_EPOCH).days
 
 SALES_PIPELINE_LABEL = "Sales Pipeline"
 
@@ -286,24 +292,25 @@ def format_hs_date(raw, storage=False):
     """
     HubSpot tarihleri hem ISO string hem epoch-ms string olarak gelebiliyor.
 
-    storage=True  -> ISO (yyyy-MM-dd): Sheets'e YAZILACAK deger, locale'den bagimsiz
-                      olarak gercek tarih hucresi olarak taninir (filter view'lar
-                      ve tarih karsilastirmalari bu deger uzerinden calisir).
-    storage=False -> dd.MM.yyyy: sadece log/debug icin okunabilir string.
-                      (Sheets'teki GORUNEN format write_sheet() icinde
-                      numberFormat olarak ayrica uygulanir, string olarak degil.)
+    storage=True  -> Sheets tarih-serial'i (int): E sutununa YAZILACAK gercek
+                      deger. Bu sayede hucre GERCEKTEN tarih tipinde olur,
+                      filter view'lardaki TODAY() karsilastirmalari calisir.
+    storage=False -> dd.MM.yyyy string: sadece Notes/Call metni gibi
+                      duz-metin baglamlarda kullanilir (Sheets hucresi degil).
     """
     if not raw:
-        return ""
+        return None if storage else ""
     try:
         if str(raw).isdigit():
             dt = datetime.fromtimestamp(int(raw) / 1000, tz=timezone.utc)
         else:
             dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         dt_local = dt.astimezone(TZ)
-        return dt_local.strftime(DATE_STORAGE_FMT if storage else DATE_FMT)
+        if storage:
+            return to_sheets_serial(dt_local.date())
+        return dt_local.strftime(DATE_FMT)
     except (ValueError, TypeError):
-        return ""
+        return None if storage else ""
 
 
 def build_notes_and_calls_text(note_props_list, call_props_list, owners_map, max_chars=45000):
@@ -399,8 +406,24 @@ KEYWORD_PLATFORM = [
     ("whatsapp", "WhatsApp"),
     ("youtube", "Youtube"),
 ]
-PAID_HINTS = ["cpc", "paid", "ppc"]
+PAID_HINTS = ["cpc", "paid", "ppc", "cpm", "reklam"]
 DOMAIN_RE = re.compile(r"[a-z0-9-]+\.[a-z]{2,}", re.IGNORECASE)
+
+
+# Bazi platformlarda organik lead akisi is modelimizde hic yok (hepsi reklam) --
+# HubSpot'un kendi organic/paid tespiti bu platformlar icin guvenilir degil,
+# bu yuzden burada is kuraliyla eziyoruz.
+PLATFORMS_ALWAYS_PAID = {"facebook"}
+
+# Facebook ve Instagram reklamlari ayni Meta Ads Manager'dan gidiyor -- ayri
+# "Instagram Ads" diye bir platform yok, ikisi de "Meta Ads" altinda birlesir.
+META_PLATFORMS = {"facebook", "instagram"}
+
+
+def ads_label(platform):
+    if (platform or "").strip().lower() in META_PLATFORMS:
+        return "Meta Ads"
+    return f"{platform} Ads"
 
 
 def compute_source(props):
@@ -409,9 +432,12 @@ def compute_source(props):
     d2 = props.get("hs_analytics_source_data_2") or ""
 
     if top == "PAID_SOCIAL":
-        return f"Paid Social - {d1 or 'Bilinmiyor'}"
+        return ads_label(d1 or "Bilinmiyor")
     if top in ("ORGANIC_SOCIAL", "SOCIAL_MEDIA"):
-        return f"Organic Social - {d1 or 'Bilinmiyor'}"
+        platform = d1 or "Bilinmiyor"
+        if platform.strip().lower() in PLATFORMS_ALWAYS_PAID:
+            return ads_label(platform)
+        return f"Organic Social - {platform}"
     if top == "PAID_SEARCH":
         return "Paid Search - Google"
     if top == "ORGANIC_SEARCH":
@@ -423,20 +449,29 @@ def compute_source(props):
     if top == "DIRECT_TRAFFIC":
         return "Direct Traffic"
     if top == "OFFLINE":
+        # HubSpot arayuzunden elle eklenen kayitlar burada "CRM_UI" olarak
+        # gelir, Drill-down 2'de ekleyen kisinin adi/emaili bulunur.
+        if "crm_ui" in (d1 or "").lower().replace(" ", "_"):
+            adder = re.sub(r"\s*\(.*?\)\s*$", "", d2 or "").strip()
+            return f"Manually Added - {adder}" if adder else "Manually Added"
         return f"Offline Sources - {d1 or 'Bilinmiyor'}"
 
     if top == "OTHER_CAMPAIGNS":
         combined = f"{d1} {d2}".lower()
 
-        if "refcode" in combined:
+        if "refcode" in combined or "referral" in combined:
             return "Referral"
 
         for keyword, platform in KEYWORD_PLATFORM:
             if keyword in combined:
-                is_paid = any(hint in combined for hint in PAID_HINTS)
-                if platform in ("Facebook", "Instagram"):
-                    return f"{'Paid' if is_paid else 'Organic'} Social - {platform}"
-                return platform  # LinkedIn / WhatsApp / Youtube icin tek etiket
+                is_paid = (
+                    any(hint in combined for hint in PAID_HINTS)
+                    or platform.lower() in PLATFORMS_ALWAYS_PAID
+                )
+                # Artik TUM platformlar icin ayni ayrim: reklamsa "{Platform} Ads",
+                # degilse "Organic Social - {Platform}" (sadece Facebook/Instagram'a
+                # ozel degil -- LinkedIn/WhatsApp/Youtube de ayni mantiga tabi).
+                return ads_label(platform) if is_paid else f"Organic Social - {platform}"
 
         if "google" in combined:
             is_paid = any(hint in combined for hint in PAID_HINTS)
@@ -557,7 +592,12 @@ def write_sheet(ws, rows, color_map):
     color_map: {row_index_0based: {"F": {...}, "G": {...}}} -- F/G renklendirme
     """
     ws.clear()
-    ws.update([COLUMNS] + rows, value_input_option="USER_ENTERED")
+    # RAW: Sheets girilen degeri YORUMLAMADAN oldugu gibi yazar -- telefon
+    # numarasi gibi alanlarda basdaki "0"in veya Record ID gibi uzun sayilarin
+    # yanlislikla sayiya cevrilip bozulmasini onler. Tek gercek sayisal deger
+    # olan Create Date (E) zaten yukarida Python int (Sheets serial) olarak
+    # hazirlandi, RAW ile de doğru sekilde gercek tarih hucresi olarak yazilir.
+    ws.update([COLUMNS] + rows, value_input_option="RAW")
 
     ws.freeze(rows=1, cols=8)
 
@@ -629,7 +669,7 @@ def main():
         source = compute_source(props)
         ilk_form = props.get("first_conversion_event_name") or "-"
         create_date_raw = props.get("createdate")
-        create_date = format_hs_date(create_date_raw, storage=True)
+        create_date = format_hs_date(create_date_raw, storage=True) or ""
 
         webinar_list = parse_multivalue_property(props.get("kat_ld_g__webinarlar"))
         gc_list = parse_multivalue_property(props.get("kat_ld_g__tum_growthclub_oturumlar_"))
