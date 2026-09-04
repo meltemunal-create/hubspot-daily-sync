@@ -18,6 +18,7 @@ import json
 import logging
 from datetime import datetime, timezone, date as date_cls
 from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import gspread
@@ -192,25 +193,46 @@ def fetch_list_name(list_id, fallback=None):
 # once batch deniyoruz; ilk gercek calistirmada oran dusuk cikarsa fallback
 # olarak tekil cagriya (chunk'lar halinde, thread'li) donebiliriz.
 
-def fetch_associations_batch(contact_ids, to_object_type):
-    """contact_id -> [associated_object_id, ...] dict'i doner."""
+def fetch_associations_batch(contact_ids, to_object_type, max_workers=10):
+    """
+    contact_id -> [associated_object_id, ...] dict'i doner.
+
+    NOT: Once v4 batch/read endpoint'i denendi ama Fransa/GHL migrasyon
+    projesinde de gorulen ayni sorun burada da cikti -- buyuk hacimde
+    (10bin+ contact) sessizce eksik/bos sonuc donuyor, hata da firlatmiyor.
+    O projede de cozum tekil v4 GET cagrisina donmekti; ayni cozumu burada
+    da uyguluyoruz, thread'li (max_workers) calistirarak hizini koruyoruz.
+    """
     result = {cid: [] for cid in contact_ids}
-    chunk_size = 100
-    for i in range(0, len(contact_ids), chunk_size):
-        chunk = contact_ids[i:i + chunk_size]
-        body = {"inputs": [{"id": cid} for cid in chunk]}
-        try:
+
+    def fetch_one(cid):
+        ids = []
+        after = None
+        while True:
+            params = {"limit": 500}
+            if after:
+                params["after"] = after
             data = hs_request(
-                "POST",
-                f"/crm/v4/associations/contacts/{to_object_type}/batch/read",
-                json=body,
+                "GET",
+                f"/crm/v4/objects/contacts/{cid}/associations/{to_object_type}",
+                params=params,
             )
-            for item in data.get("results", []):
-                from_id = item["from"]["id"]
-                to_ids = [t["toObjectId"] for t in item.get("to", [])]
-                result[from_id] = to_ids
-        except requests.HTTPError as e:
-            log.warning(f"Batch association hatasi ({to_object_type}): {e}")
+            ids.extend(r["toObjectId"] for r in data.get("results", []))
+            after = data.get("paging", {}).get("next", {}).get("after")
+            if not after:
+                break
+        return cid, ids
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(fetch_one, cid): cid for cid in contact_ids}
+        for future in as_completed(futures):
+            cid = futures[future]
+            try:
+                _, ids = future.result()
+                result[cid] = ids
+            except Exception as e:
+                log.warning(f"Association hatasi (contact {cid}, {to_object_type}): {e}")
+
     return result
 
 
@@ -698,16 +720,23 @@ def main():
     log.info("Sales Pipeline stage haritasi cekiliyor...")
     sales_pipeline_id, stage_map = fetch_sales_pipeline_stage_map()
 
+    log.info(f"Sales Pipeline id={sales_pipeline_id}, {len(stage_map)} stage bulundu.")
     log.info("Deal stage'ler cekiliyor...")
     deal_stage_by_contact = fetch_deal_stage_for_contacts(contact_ids, sales_pipeline_id, stage_map)
+    dolu_stage = sum(1 for v in deal_stage_by_contact.values() if v)
+    log.info(f"Deal stage: {dolu_stage}/{len(deal_stage_by_contact)} contact'ta dolu deger var.")
 
     log.info("Note/Call association'lari cekiliyor...")
     note_assoc = fetch_associations_batch(contact_ids, "notes")
     call_assoc = fetch_associations_batch(contact_ids, "calls")
     all_note_ids = [n for ids in note_assoc.values() for n in ids]
     all_call_ids = [c for ids in call_assoc.values() for c in ids]
+    log.info(f"Association sonucu: {len(all_note_ids)} note-id, {len(all_call_ids)} call-id bulundu "
+             f"({sum(1 for v in note_assoc.values() if v)} contact'ta not, "
+             f"{sum(1 for v in call_assoc.values() if v)} contact'ta call var).")
     notes_data = batch_read_objects("notes", all_note_ids, ["hs_note_body", "hs_timestamp", "hubspot_owner_id"])
     calls_data = batch_read_objects("calls", all_call_ids, ["hs_call_body", "hs_call_title", "hs_timestamp", "hubspot_owner_id"])
+    log.info(f"Okunan icerik: {len(notes_data)} note, {len(calls_data)} call (batch_read basarili olanlar).")
 
     # TODO: owners.read izni varsa /crm/v3/owners ile gercek isimleri cek.
     # Simdilik bos -- fallback olarak owner ID ham haliyle yaziliyor.
