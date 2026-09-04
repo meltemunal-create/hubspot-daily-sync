@@ -1,21 +1,24 @@
 """
-TEK SEFERLIK kurulum script'i -- Sheet1 uzerinde filter view'lari olusturur:
+TEK SEFERLIK kurulum script'i -- spreadsheet'teki HER "veri sekmesi"nde
+(basligi "Create Date" olan bir E sutunu bulunan her sekme -- Sheet1, HubSpot
+liste sekmesi, ileride eklenecek her turlu benzer sekme) asagidaki filter
+view'lari otomatik olusturur:
 
   Today, Yesterday, This Week, Last Week, This Month, Last Month,
   This Quarter, Last Quarter, This Year, Last Year,
   January, February, March, April, May, June, July, August, September,
   October, November, December, Q1, Q2, Q3, Q4
 
-Toplam 26 view. Her granularite icin hem "bulunulan donem" hem "bir onceki
-donem" var. Aylar ve adlandirilmis ceyrekler (Q1-Q4) her zaman ICINDE
-BULUNULAN YILA gore hesaplanir (YEAR(TODAY()) uzerinden) -- yani 2027
-geldiginde script'i tekrar calistirmadan otomatik o yila kayar.
+Sekme ismini hardcode etmiyoruz -- SHEET_NAME degistiyse veya yeni bir HubSpot
+liste sekmesi eklendiyse, bu script tekrar calistirildiginda otomatik onu da
+bulur ve filtreleri kurar.
 
-Hepsi Create Date (E sutunu) uzerinden CUSTOM_FORMULA kriteriyle calisir.
+Toplam 26 view / sekme. Aylar ve adlandirilmis ceyrekler (Q1-Q4) her zaman
+ICINDE BULUNULAN YILA gore hesaplanir (YEAR(TODAY()) uzerinden).
 
-NOT: Eger daha once eski/bozuk filter view'lar olusturduysan, bu script'i
-calistirmadan once Data > Filter views'tan hepsini silmelisin -- yoksa
-ayni isimle ikinci bir kopyasi olusabilir / cakisabilir.
+NOT: Eger bir sekmede daha once eski/bozuk filter view'lar olusturduysan, bu
+script'i calistirmadan once o sekmede Data > Filter views'tan hepsini
+silmelisin -- yoksa ayni isimle ikinci bir kopyasi olusabilir / cakisabilir.
 
 Calistirma: python setup_filter_views.py
 Gerekli ortam degiskenleri: GOOGLE_SERVICE_ACCOUNT_JSON, SPREADSHEET_ID
@@ -28,11 +31,11 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1ZaTNGfpbLvkR-E9WaMJjnFoFEs6HPIIFpwohQHg9xcU")
-SHEET_NAME = os.environ.get("SHEET_NAME", "Sheet1")
 NUM_COLUMNS = 27  # A..AA
 
 # Create Date = E sutunu = index 4 (0-based)
 CREATE_DATE_COL_INDEX = 4
+CREATE_DATE_HEADER = "Create Date"
 
 AYLAR = [
     "January", "February", "March", "April", "May", "June",
@@ -41,15 +44,12 @@ AYLAR = [
 
 
 def month_formula(month_number):
-    """month_number: 1-12. Icinde bulunulan yilin o ayi. EDATE yil donusunu
-    (ör. Aralik -> bir sonraki yilin Ocak'i) otomatik dogru hesaplar."""
     start = f"DATE(YEAR(TODAY()),{month_number},1)"
     end = f"EDATE(DATE(YEAR(TODAY()),{month_number},1),1)"
     return f"=AND($E2>={start},$E2<{end})"
 
 
 def quarter_formula(quarter_number):
-    """quarter_number: 1-4. Icinde bulunulan yilin o ceyregi."""
     start_month = 3 * (quarter_number - 1) + 1
     start = f"DATE(YEAR(TODAY()),{start_month},1)"
     end = f"EDATE(DATE(YEAR(TODAY()),{start_month},1),3)"
@@ -71,24 +71,24 @@ VIEWS = [
 VIEWS += [(ay, month_formula(i + 1)) for i, ay in enumerate(AYLAR)]
 VIEWS += [(f"Q{q}", quarter_formula(q)) for q in range(1, 5)]
 
-# Google Sheets'in "Change view" menusu, olusturma sirasina bakmadan HER ZAMAN
-# alfabetik siralar -- bunu kapatan bir ayar yok. Baslara numara koyup
-# alfabetik siralamayi kronolojik siraya zorluyoruz (01, 02, 03... "This/Last"
-# harflerinden once gelir).
+# Google Sheets'in "Change view" menusu HER ZAMAN alfabetik siralar -- baslara
+# numara koyup bu siralamayi kronolojik siraya zorluyoruz.
 VIEWS = [(f"{i+1:02d} - {title}", formula) for i, (title, formula) in enumerate(VIEWS)]
 
 
-def main():
-    creds_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SPREADSHEET_ID)
-    ws = sh.worksheet(SHEET_NAME)
+def find_data_sheets(sh):
+    """Basliginda (1. satir, E sutunu) 'Create Date' yazan her sekmeyi bulur."""
+    data_sheets = []
+    for ws in sh.worksheets():
+        header = ws.row_values(1)
+        if len(header) > CREATE_DATE_COL_INDEX and header[CREATE_DATE_COL_INDEX] == CREATE_DATE_HEADER:
+            data_sheets.append(ws)
+    return data_sheets
 
-    requests_batch = []
-    for title, formula in VIEWS:
-        requests_batch.append({
+
+def build_requests_for_sheet(ws):
+    return [
+        {
             "addFilterView": {
                 "filter": {
                     "title": title,
@@ -108,11 +108,33 @@ def main():
                     },
                 }
             }
-        })
+        }
+        for title, formula in VIEWS
+    ]
+
+
+def main():
+    creds_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(SPREADSHEET_ID)
+
+    data_sheets = find_data_sheets(sh)
+    if not data_sheets:
+        print("Hicbir sekmede 'Create Date' basligi (E sutunu) bulunamadi -- "
+              "once sync.py'yi calistirip veriyi olusturman gerekebilir.")
+        return
+
+    print(f"{len(data_sheets)} veri sekmesi bulundu: {', '.join(ws.title for ws in data_sheets)}")
+
+    requests_batch = []
+    for ws in data_sheets:
+        requests_batch.extend(build_requests_for_sheet(ws))
 
     sh.batch_update({"requests": requests_batch})
-    print(f"{len(VIEWS)} filter view olusturuldu: {', '.join(v[0] for v in VIEWS)}")
-    print("Data > Filter views menusunden kontrol et.")
+    print(f"Her sekmeye {len(VIEWS)} filter view kuruldu "
+          f"(toplam {len(requests_batch)} view, {len(data_sheets)} sekme).")
 
 
 if __name__ == "__main__":
