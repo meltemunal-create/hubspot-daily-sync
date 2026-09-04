@@ -1,10 +1,10 @@
-name: HubSpot -> Sheets Daily Sync
+name: HubSpot -> Sheets Twice-Daily Sync
 
 on:
   schedule:
-    # 01:00 UTC = 04:00 Europe/Istanbul (yaz/kis saati GitHub cron'unda otomatik
-    # ayarlanmiyor, gerekirse bu satiri mevsime gore elle guncelle)
-    - cron: "0 1 * * *"
+    # Turkiye (Europe/Istanbul) sabit UTC+3 (DST yok, 2016'dan beri degismiyor)
+    - cron: "0 5 * * *"   # 08:00 Europe/Istanbul
+    - cron: "0 15 * * *"  # 18:00 Europe/Istanbul
   workflow_dispatch: {}   # Actions sekmesinden elle de calistirilabilsin diye
 
 permissions:
