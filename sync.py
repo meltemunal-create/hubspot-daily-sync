@@ -18,7 +18,6 @@ import json
 import logging
 from datetime import datetime, timezone, date as date_cls
 from zoneinfo import ZoneInfo
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import gspread
@@ -193,64 +192,41 @@ def fetch_list_name(list_id, fallback=None):
 # once batch deniyoruz; ilk gercek calistirmada oran dusuk cikarsa fallback
 # olarak tekil cagriya (chunk'lar halinde, thread'li) donebiliriz.
 
-def fetch_associations_batch(contact_ids, to_object_type, max_workers=10):
+def fetch_objects_with_contact_associations(object_type, properties):
     """
-    contact_id -> [associated_object_id, ...] dict'i doner.
+    Contact'tan notes/calls/deals'a tek tek gitmek yerine, TERSINE: bu object
+    tipinin TUM kayitlarini "associations=contacts" parametresiyle tek
+    sayfalama dongusunde ceker -- her kayit, hangi contact'a bagli oldugu
+    bilgisiyle birlikte gelir. 16bin+ contact icin ayri ayri sorgu atmaya
+    hic gerek kalmiyor; sorgu sayisi bu object tipinin KENDI kayit sayisina
+    (genelde contact sayisindan çok daha az) bagli, HubSpot'un rate limitine
+    takilma riski dramatik sekilde azaliyor.
 
-    NOT: Once v4 batch/read endpoint'i denendi ama Fransa/GHL migrasyon
-    projesinde de gorulen ayni sorun burada da cikti -- buyuk hacimde
-    (10bin+ contact) sessizce eksik/bos sonuc donuyor, hata da firlatmiyor.
-    O projede de cozum tekil v4 GET cagrisina donmekti; ayni cozumu burada
-    da uyguluyoruz, thread'li (max_workers) calistirarak hizini koruyoruz.
+    Doner: (contact_id -> [object_id,...] dict, object_id -> properties dict)
     """
-    result = {cid: [] for cid in contact_ids}
-
-    def fetch_one(cid):
-        ids = []
-        after = None
-        while True:
-            params = {"limit": 500}
-            if after:
-                params["after"] = after
-            data = hs_request(
-                "GET",
-                f"/crm/v4/objects/contacts/{cid}/associations/{to_object_type}",
-                params=params,
-            )
-            ids.extend(r["toObjectId"] for r in data.get("results", []))
-            after = data.get("paging", {}).get("next", {}).get("after")
-            if not after:
-                break
-        return cid, ids
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(fetch_one, cid): cid for cid in contact_ids}
-        for future in as_completed(futures):
-            cid = futures[future]
-            try:
-                _, ids = future.result()
-                result[cid] = ids
-            except Exception as e:
-                log.warning(f"Association hatasi (contact {cid}, {to_object_type}): {e}")
-
-    return result
-
-
-def batch_read_objects(object_type, object_ids, properties):
-    """Verilen ID listesindeki object'leri (note/call/deal) toplu okur."""
-    out = {}
-    chunk_size = 100
-    ids = list(set(object_ids))
-    for i in range(0, len(ids), chunk_size):
-        chunk = ids[i:i + chunk_size]
-        body = {
-            "properties": properties,
-            "inputs": [{"id": oid} for oid in chunk],
+    contact_to_ids = {}
+    id_to_props = {}
+    after = None
+    while True:
+        params = {
+            "limit": 100,
+            "properties": ",".join(properties),
+            "associations": "contacts",
         }
-        data = hs_request("POST", f"/crm/v3/objects/{object_type}/batch/read", json=body)
+        if after:
+            params["after"] = after
+        data = hs_request("GET", f"/crm/v3/objects/{object_type}", params=params)
         for obj in data.get("results", []):
-            out[obj["id"]] = obj.get("properties", {})
-    return out
+            oid = obj["id"]
+            id_to_props[oid] = obj.get("properties", {})
+            assoc_contacts = (obj.get("associations") or {}).get("contacts", {}).get("results", [])
+            for c in assoc_contacts:
+                contact_to_ids.setdefault(c["id"], []).append(oid)
+        after = data.get("paging", {}).get("next", {}).get("after")
+        if not after:
+            break
+    log.info(f"{object_type}: {len(id_to_props)} kayit cekildi, {len(contact_to_ids)} contact'a bagli.")
+    return contact_to_ids, id_to_props
 
 
 # ----------------------------------------------------------------------------
@@ -269,30 +245,19 @@ def fetch_sales_pipeline_stage_map():
     return None, {}
 
 
-def fetch_deal_stage_for_contacts(contact_ids, sales_pipeline_id, stage_map):
+def compute_deal_stage_by_contact(deal_assoc, deals_data, sales_pipeline_id, stage_map):
     """Her contact icin, Sales Pipeline'daki en son guncellenen deal'in stage adini doner."""
-    assoc = fetch_associations_batch(contact_ids, "deals")
-    all_deal_ids = [d for ids in assoc.values() for d in ids]
-    if not all_deal_ids:
-        return {cid: "" for cid in contact_ids}
-
-    deals = batch_read_objects(
-        "deals", all_deal_ids,
-        properties=["pipeline", "dealstage", "hs_lastmodifieddate"],
-    )
-
     result = {}
-    for cid, deal_ids in assoc.items():
+    for cid, deal_ids in deal_assoc.items():
         candidates = []
         for did in deal_ids:
-            props = deals.get(did)
+            props = deals_data.get(did)
             if not props:
                 continue
             if props.get("pipeline") != sales_pipeline_id:
                 continue
             candidates.append(props)
         if not candidates:
-            result[cid] = ""
             continue
         candidates.sort(key=lambda p: p.get("hs_lastmodifieddate") or "", reverse=True)
         latest = candidates[0]
@@ -719,24 +684,26 @@ def main():
 
     log.info("Sales Pipeline stage haritasi cekiliyor...")
     sales_pipeline_id, stage_map = fetch_sales_pipeline_stage_map()
-
     log.info(f"Sales Pipeline id={sales_pipeline_id}, {len(stage_map)} stage bulundu.")
-    log.info("Deal stage'ler cekiliyor...")
-    deal_stage_by_contact = fetch_deal_stage_for_contacts(contact_ids, sales_pipeline_id, stage_map)
-    dolu_stage = sum(1 for v in deal_stage_by_contact.values() if v)
-    log.info(f"Deal stage: {dolu_stage}/{len(deal_stage_by_contact)} contact'ta dolu deger var.")
 
-    log.info("Note/Call association'lari cekiliyor...")
-    note_assoc = fetch_associations_batch(contact_ids, "notes")
-    call_assoc = fetch_associations_batch(contact_ids, "calls")
-    all_note_ids = [n for ids in note_assoc.values() for n in ids]
-    all_call_ids = [c for ids in call_assoc.values() for c in ids]
-    log.info(f"Association sonucu: {len(all_note_ids)} note-id, {len(all_call_ids)} call-id bulundu "
-             f"({sum(1 for v in note_assoc.values() if v)} contact'ta not, "
-             f"{sum(1 for v in call_assoc.values() if v)} contact'ta call var).")
-    notes_data = batch_read_objects("notes", all_note_ids, ["hs_note_body", "hs_timestamp", "hubspot_owner_id"])
-    calls_data = batch_read_objects("calls", all_call_ids, ["hs_call_body", "hs_call_title", "hs_timestamp", "hubspot_owner_id"])
-    log.info(f"Okunan icerik: {len(notes_data)} note, {len(calls_data)} call (batch_read basarili olanlar).")
+    log.info("Notes cekiliyor (associations dahil, tersine yontem)...")
+    note_assoc, notes_data = fetch_objects_with_contact_associations(
+        "notes", ["hs_note_body", "hs_timestamp", "hubspot_owner_id"]
+    )
+    log.info("Calls cekiliyor (associations dahil, tersine yontem)...")
+    call_assoc, calls_data = fetch_objects_with_contact_associations(
+        "calls", ["hs_call_body", "hs_call_title", "hs_timestamp", "hubspot_owner_id"]
+    )
+    log.info("Deals cekiliyor (associations dahil, tersine yontem)...")
+    deal_assoc, deals_data = fetch_objects_with_contact_associations(
+        "deals", ["pipeline", "dealstage", "hs_lastmodifieddate"]
+    )
+
+    deal_stage_by_contact = compute_deal_stage_by_contact(deal_assoc, deals_data, sales_pipeline_id, stage_map)
+    dolu_stage = sum(1 for v in deal_stage_by_contact.values() if v)
+    log.info(f"Deal stage: {dolu_stage}/{len(contact_ids)} contact'ta dolu deger var.")
+    log.info(f"Notes/Calls: {sum(1 for v in note_assoc.values() if v)} contact'ta not, "
+             f"{sum(1 for v in call_assoc.values() if v)} contact'ta call var.")
 
     # TODO: owners.read izni varsa /crm/v3/owners ile gercek isimleri cek.
     # Simdilik bos -- fallback olarak owner ID ham haliyle yaziliyor.
