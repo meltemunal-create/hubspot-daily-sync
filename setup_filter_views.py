@@ -71,6 +71,12 @@ VIEWS = [
 VIEWS += [(ay, month_formula(i + 1)) for i, ay in enumerate(AYLAR)]
 VIEWS += [(f"Q{q}", quarter_formula(q)) for q in range(1, 5)]
 
+# Google Sheets'in "Change view" menusu, olusturma sirasina bakmadan HER ZAMAN
+# alfabetik siralar -- bunu kapatan bir ayar yok. Baslara numara koyup
+# alfabetik siralamayi kronolojik siraya zorluyoruz (01, 02, 03... "This/Last"
+# harflerinden once gelir).
+VIEWS = [(f"{i+1:02d} - {title}", formula) for i, (title, formula) in enumerate(VIEWS)]
+
 
 def main():
     creds_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
