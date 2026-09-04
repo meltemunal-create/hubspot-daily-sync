@@ -31,7 +31,7 @@ HUBSPOT_TOKEN = os.environ["HUBSPOT_PRIVATE_APP_TOKEN"]
 GOOGLE_SA_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]  # tum JSON icerigi, secret olarak
 
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1ZaTNGfpbLvkR-E9WaMJjnFoFEs6HPIIFpwohQHg9xcU")
-SHEET_NAME = os.environ.get("SHEET_NAME", "Sheet1")
+SHEET_NAME = os.environ.get("SHEET_NAME", "ACTR ALL DATA")
 LIST_ID = os.environ.get("HUBSPOT_LIST_ID", "6526")  # ayri sekmede gosterilecek HubSpot listesi
 
 TZ = ZoneInfo("Europe/Istanbul")
