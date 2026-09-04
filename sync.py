@@ -32,6 +32,7 @@ GOOGLE_SA_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]  # tum JSON icerigi, 
 
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1ZaTNGfpbLvkR-E9WaMJjnFoFEs6HPIIFpwohQHg9xcU")
 SHEET_NAME = os.environ.get("SHEET_NAME", "Sheet1")
+LIST_ID = os.environ.get("HUBSPOT_LIST_ID", "6526")  # ayri sekmede gosterilecek HubSpot listesi
 
 TZ = ZoneInfo("Europe/Istanbul")
 DATE_FMT = "%d.%m.%Y"          # goruntuleme formati (hucre number-format olarak uygulanir)
@@ -153,6 +154,34 @@ def fetch_all_contacts():
         log.info(f"{len(contacts)} contact cekildi, devam ediyor...")
     log.info(f"Toplam {len(contacts)} contact cekildi.")
     return contacts
+
+
+def fetch_list_membership_ids(list_id):
+    """HubSpot listesindeki (statik veya dinamik fark etmez) tum record ID'leri doner."""
+    ids = set()
+    after = None
+    while True:
+        params = {"limit": 100}
+        if after:
+            params["after"] = after
+        data = hs_request("GET", f"/crm/v3/lists/{list_id}/memberships", params=params)
+        for item in data.get("results", []):
+            ids.add(str(item.get("recordId")))
+        after = data.get("paging", {}).get("next", {}).get("after")
+        if not after:
+            break
+    log.info(f"Liste {list_id}: {len(ids)} uye bulundu.")
+    return ids
+
+
+def fetch_list_name(list_id, fallback=None):
+    try:
+        data = hs_request("GET", f"/crm/v3/lists/{list_id}")
+        name = data.get("name") or (data.get("list") or {}).get("name")
+        return name or fallback or f"HubSpot List {list_id}"
+    except requests.HTTPError as e:
+        log.warning(f"Liste adi alinamadi ({list_id}): {e}")
+        return fallback or f"HubSpot List {list_id}"
 
 
 # ----------------------------------------------------------------------------
@@ -546,17 +575,19 @@ def compute_segment(yillik_ciro, pozisyon):
 # 7) GOOGLE SHEETS baglantisi + yazma
 # ----------------------------------------------------------------------------
 
-def connect_sheet():
+def connect_spreadsheet():
     creds_info = json.loads(GOOGLE_SA_JSON)
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
     gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SPREADSHEET_ID)
+    return gc.open_by_key(SPREADSHEET_ID)
+
+
+def get_or_create_worksheet(sh, title):
     try:
-        ws = sh.worksheet(SHEET_NAME)
+        return sh.worksheet(title)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=SHEET_NAME, rows=2000, cols=len(COLUMNS))
-    return ws
+        return sh.add_worksheet(title=title, rows=2000, cols=len(COLUMNS))
 
 
 def read_manual_columns(ws):
@@ -636,6 +667,29 @@ def _hex_to_rgb(hex_color):
 # MAIN
 # ----------------------------------------------------------------------------
 
+def assemble_and_write(ws, rows):
+    """
+    rows: [(create_date_raw, row_list, musteri_renk), ...]
+    En yeni Create Date en usте olacak sekilde siralar, mevcut A/B manuel
+    notlarini (Record ID eslesmesiyle) korur, ve sheet'e yazar.
+    """
+    rows = sorted(rows, key=lambda r: r[0] or "0", reverse=True)
+    manual_by_record_id = read_manual_columns(ws)
+
+    final_rows = []
+    color_map = {}
+    for idx, (_, row, musteri_renk) in enumerate(rows):
+        record_id = row[-1]
+        a_val, b_val = manual_by_record_id.get(record_id, ("", ""))
+        row[0] = a_val
+        row[1] = b_val
+        final_rows.append(row)
+        color_map[idx] = {"G": musteri_renk}
+
+    write_sheet(ws, final_rows, color_map)
+    return len(final_rows)
+
+
 def main():
     log.info("HubSpot contact'lari cekiliyor...")
     contacts = fetch_all_contacts()
@@ -660,7 +714,6 @@ def main():
     owners_map = {}
 
     rows = []
-    color_map = {}
 
     for contact in contacts:
         props = contact.get("properties", {})
@@ -720,20 +773,21 @@ def main():
     # En yeni Create Date en usте
     rows.sort(key=lambda r: r[0] or "0", reverse=True)
 
-    ws = connect_sheet()
-    manual_by_record_id = read_manual_columns(ws)
+    sh = connect_spreadsheet()
 
-    final_rows = []
-    for idx, (_, row, musteri_renk) in enumerate(rows):
-        record_id = row[-1]
-        a_val, b_val = manual_by_record_id.get(record_id, ("", ""))
-        row[0] = a_val
-        row[1] = b_val
-        final_rows.append(row)
-        color_map[idx] = {"G": musteri_renk}  # F (Ozet) rengi ayrica satir-ici, burada atlandi
+    ws_all = get_or_create_worksheet(sh, SHEET_NAME)
+    n = assemble_and_write(ws_all, rows)
+    log.info(f"{SHEET_NAME}: {n} satir yazildi.")
 
-    log.info(f"{len(final_rows)} satir yaziliyor...")
-    write_sheet(ws, final_rows, color_map)
+    log.info(f"HubSpot listesi ({LIST_ID}) uyeleri cekiliyor...")
+    list_member_ids = fetch_list_membership_ids(LIST_ID)
+    list_name = fetch_list_name(LIST_ID)
+    list_rows = [r for r in rows if r[1][-1] in list_member_ids]
+
+    ws_list = get_or_create_worksheet(sh, list_name)
+    n_list = assemble_and_write(ws_list, list_rows)
+    log.info(f"{list_name}: {n_list} satir yazildi.")
+
     log.info("Tamamlandi.")
 
 
